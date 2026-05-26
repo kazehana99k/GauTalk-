@@ -55,6 +55,7 @@ data/*
 # whitelist the docs we DO want to track
 !/README.md
 !/README_en.md
+!/DESIGN.md
 !/PROJECT_HISTORY.md
 !/CLAUDE.md
 !/LICENSE.md

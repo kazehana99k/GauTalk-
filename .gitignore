@@ -1,22 +1,68 @@
+# --- python / build ---
 __pycache__/
+*.pyc
 build/
 *.egg-info/
 *.so
-*.mp4
-*.pth
-
-data_utils/face_tracking/3DMM/*
-data_utils/face_parsing/79999_iter.pth
-
-*.pyc
-.vscode
-output*
-build
 gridencoder/gridencoder.egg-info
 diff_rasterization/diff_rast.egg-info
 diff_rasterization/dist
+
+# --- media / weights ---
+*.mp4
+*.pth
+*.pth.[0-9]
+*.npy
+*.npz
+
+# --- editor / IDE / dotfiles ---
+.vscode
+.idea/
+.claude/
+.cursor/
+.session-*
+.all-sessions-*
+.placeholder
+
+# --- pre-trained model assets ---
+data_utils/face_tracking/3DMM/*
+data_utils/face_parsing/79999_iter.pth
+data_utils/easyportrait/fpn-fp-512*
+
+# --- runs / logs / outputs ---
+output*
+macrontest/
+logs/
 tensorboard_3d
 screenshots
+crop_log.txt
+emoca_run.log
 
+# --- datasets ---
 data/*
 !*.gitkeep
+
+# --- shell redirect junk (argparse flags treated as filenames) ---
+--*
+/-s
+
+# --- root-level docs/notes: ignore all by default, whitelist below ---
+/*.md
+/*.txt
+/*.bak
+/*.bak_*
+
+# whitelist the docs we DO want to track
+!/README.md
+!/README_en.md
+!/PROJECT_HISTORY.md
+!/CLAUDE.md
+!/LICENSE.md
+
+# --- third-party trees we don't ship in this repo ---
+/EMOCA/
+/home/
+/debug_flame_mapper_vis/
+/debug_sim3_vis/
+# gaussian-splatting was cloned locally for reference, not part of our repo
+submodules/gaussian-splatting/

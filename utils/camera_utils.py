@@ -85,10 +85,49 @@ def loadCamOnTheFly(camera):
 
     mask_path = image_path.replace("gt_imgs", "parsing").replace("jpg", "png")
     mask = PILtoTorch(np.array(Image.open(mask_path).convert("RGB")) * 1.0).to(camera.data_device)
-    camera.talking_dict['face_mask'] = (mask[2] > 254) * (mask[0] == 0) * (mask[1] == 0) ^ teeth_mask
     camera.talking_dict['hair_mask'] = (mask[0] < 1) * (mask[1] < 1) * (mask[2] < 1)
-    camera.talking_dict['mouth_mask'] = (mask[0] == 100) * (mask[1] == 100) * (mask[2] == 100) + teeth_mask
-    
+
+    # V28: opt-in lip/cavity refinement -- if TG_LIP_CAVITY=1 and the per-frame
+    # lip_mask + cavity_mask .npy files exist, use them. Otherwise fall back to
+    # the legacy V26 path (face_parsing_fine class==11 + teeth_mask).
+    _use_lc = os.environ.get('TG_LIP_CAVITY', '0') == '1'
+    _lip_p = image_path.replace("gt_imgs", "lip_mask").replace("jpg", "npy")
+    _cav_p = image_path.replace("gt_imgs", "cavity_mask").replace("jpg", "npy")
+    if _use_lc and os.path.exists(_lip_p) and os.path.exists(_cav_p):
+        _lip = torch.as_tensor(np.load(_lip_p)).to(camera.data_device)
+        _cav = torch.as_tensor(np.load(_cav_p)).to(camera.data_device)
+        camera.talking_dict['lip_mask']    = _lip
+        camera.talking_dict['cavity_mask'] = _cav
+        camera.talking_dict['mouth_mask']  = _lip | _cav
+        camera.talking_dict['face_mask']   = (mask[2] > 254) * (mask[0] == 0) * (mask[1] == 0) ^ camera.talking_dict['mouth_mask']
+    else:
+        camera.talking_dict['face_mask'] = (mask[2] > 254) * (mask[0] == 0) * (mask[1] == 0) ^ teeth_mask
+        # V26: prefer fp==11 (mouth_inner) from face_parsing_fine over BiSeNet RGB=100
+        # to eliminate lip-jitter contamination of the mouth supervision mask.
+        _fp_p = image_path.replace("gt_imgs", "face_parsing_fine").replace("jpg", "npy")
+        if os.path.exists(_fp_p):
+            _fp = np.load(_fp_p)
+            if _fp.ndim == 3 and _fp.shape[0] == 1: _fp = _fp[0]
+            if _fp.ndim == 3 and _fp.shape[-1] == 1: _fp = _fp[..., 0]
+            _fp_t = torch.as_tensor(_fp).to(camera.data_device)
+            # R-FIXMASK (gated, default OFF): expand mouth_mask to include upper
+            # lip (class 12) + lower lip (class 13). Diagnostic showed baseline
+            # mouth_mask = class 11 only = ~508 px on apex frames, missing both
+            # lips → mouth Gaussians never supervised on lip pixels → teeth area
+            # smearing. Set TG_MOUTH_MASK_FULL=1 to include classes 11+12+13.
+            _mask_full = os.environ.get('TG_MOUTH_MASK_FULL', '0') == '1'
+            if _mask_full:
+                camera.talking_dict['mouth_mask'] = ((_fp_t == 11) | (_fp_t == 12) | (_fp_t == 13) | teeth_mask.bool())
+            else:
+                camera.talking_dict['mouth_mask'] = ((_fp_t == 11) | teeth_mask.bool())
+            # R-SUP-1: also populate fp_eye_mask on lazy-load path. Active reader
+            # writes it under preload=True; train_face_v30 also hits the lazy path
+            # when cam.original_image is None, so we must add it here too.
+            if 'fp_eye_mask' not in camera.talking_dict:
+                camera.talking_dict['fp_eye_mask'] = ((_fp_t == 4) | (_fp_t == 5))
+        else:
+            camera.talking_dict['mouth_mask'] = (mask[0] == 100) * (mask[1] == 100) * (mask[2] == 100) + teeth_mask
+
     camera.original_image = PILtoTorch(image).type("torch.ByteTensor").clamp(0, 255).to(camera.data_device)
     camera.background = bg.type("torch.ByteTensor").clamp(0, 255).to(camera.data_device)
     camera.image_width = camera.original_image.shape[2]

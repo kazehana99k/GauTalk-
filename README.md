@@ -16,7 +16,7 @@ GauTalk は、音声と Action Unit から駆動される **3D Gaussian Splattin
 AU25 (顎の開き) の明示入力、per-Gaussian cross-attention、dual-head mouth driver、ArcFace + DINOv2
 の知覚損失などを組み合わせ、長尺・任意音声でも口元が安定して動くように設計されています。
 
-> オリジナル英語版の参考用 README は [`README_en.md`](README_en.md) を参照してください。
+> 英語版 README は [`README_en.md`](README_en.md) を参照してください。
 
 ## Installation
 

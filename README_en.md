@@ -1,150 +1,208 @@
-# TalkingGaussian: Structure-Persistent 3D Talking Head Synthesis via Gaussian Splatting
+# GauTalk: AU25-Driven 3D Gaussian Talking Head Synthesis
 
-This is the official repository for our ECCV 2024 paper **TalkingGaussian: Structure-Persistent 3D Talking Head Synthesis via Gaussian Splatting**.
+> 🚧 **Work in Progress** — this is an active research project.
+> APIs, training scripts, checkpoint names, and environment variables may change without notice.
+> See [DESIGN.md](DESIGN.md) for the detailed design and [DESIGN.md §4](DESIGN.md#4-ロードマップ) for open problems.
 
-[Paper](https://arxiv.org/abs/2404.15264) | [Project](https://fictionarry.github.io/TalkingGaussian/) | [Video](https://youtu.be/c5VG7HkDs8I)
+[Paper (TBA)] | [Project (TBA)] | [Video (TBA)]
 
-![image](./assets/main.png)
+![teaser](assets/main.png)
+
+> 🎞️ Demo video / qualitative comparisons — Coming soon.
+
+GauTalk is a **3D Gaussian Splatting-based talking-head synthesis** pipeline driven by audio and
+Action Units. It is trained from a per-subject video (1–5 min) together with OpenFace AUs and
+HuBERT / DeepSpeech audio features, and renders a photorealistic talking face for novel audio.
+It combines explicit AU25 (jaw-opening) input, per-Gaussian cross-attention, a dual-head mouth
+driver, and ArcFace + DINOv2 perceptual losses so that the mouth stays stable over long, arbitrary
+audio.
+
+> **This is not the official TalkingGaussian repository.** GauTalk is built on top of
+> [TalkingGaussian (ECCV 2024)](https://github.com/Fictionarry/TalkingGaussian); see the
+> Acknowledgement section for full attribution. A Japanese version of this README is available at
+> [`README.md`](README.md).
 
 ## Installation
 
-Tested on Ubuntu 18.04, CUDA 11.3, PyTorch 1.12.1
+Tested on Ubuntu 18.04, CUDA 11.3, PyTorch 1.12.1.
 
-```
-git clone git@github.com:Fictionarry/TalkingGaussian.git --recursive
+```bash
+git clone https://github.com/kazehana99k/GauTalk-.git --recursive
+cd GauTalk-
 
 conda env create --file environment.yml
 conda activate talking_gaussian
 pip install "git+https://github.com/facebookresearch/pytorch3d.git"
 pip install tensorflow-gpu==2.8.0
+pip install facenet-pytorch    # for the ArcFace loss (optional)
 ```
 
-If encounter installation problem from the `diff-gaussian-rasterization` or `gridencoder`, please refer to [gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting) and [torch-ngp](https://github.com/ashawkey/torch-ngp).
+If the `diff-gaussian-rasterization` / `gridencoder` build fails, refer to
+[gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting) and
+[torch-ngp](https://github.com/ashawkey/torch-ngp).
 
 ### Preparation
 
-- Prepare face-parsing model and  the 3DMM model for head pose estimation.
+```bash
+# 3DMM + face_parsing
+bash scripts/prepare.sh
 
-  ```bash
-  bash scripts/prepare.sh
-  ```
+# Place the Basel Face Model 2009 (01_MorphableModel.mat) in data_utils/face_tracking/3DMM/
+cd data_utils/face_tracking && python convert_BFM.py && cd ../..
 
-- Download 3DMM model from [Basel Face Model 2009](https://faces.dmi.unibas.ch/bfm/main.php?nav=1-1-0&id=details):
+# EasyPortrait (for teeth masks)
+pip install -U openmim && mim install mmcv-full==1.7.1
+wget "https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/easyportrait/experiments/models/fpn-fp-512.pth" \
+  -O data_utils/easyportrait/fpn-fp-512.pth
 
-  ```bash
-  # 1. copy 01_MorphableModel.mat to data_util/face_tracking/3DMM/
-  # 2. run following
-  cd data_utils/face_tracking
-  python convert_BFM.py
-  ```
-
-- Prepare the environment for [EasyPortrait](https://github.com/hukenovs/easyportrait):
-
-  ```bash
-  # prepare mmcv
-  conda activate talking_gaussian
-  pip install -U openmim
-  mim install mmcv-full==1.7.1
-
-  # download model weight
-  cd data_utils/easyportrait
-  wget "https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/easyportrait/experiments/models/fpn-fp-512.pth"
-  ```
+# OpenFace (AU extraction) — official instructions: https://github.com/TadasBaltrusaitis/OpenFace
+```
 
 ## Usage
 
 ### Important Notice
 
-- This code is provided for research purposes only. The author makes no warranties, express or implied, as to the accuracy, completeness, or fitness for a particular purpose of the code. Use this code at your own risk.
-
-- The author explicitly prohibits the use of this code for any malicious or illegal activities. By using this code, you agree to comply with all applicable laws and regulations, and you agree not to use it to harm others or to perform any actions that would be considered unethical or illegal.
-
-- The author will not be responsible for any damages, losses, or issues that arise from the use of this code. 
-
-- Users are encouraged to use this code responsibly and ethically.
+- This code is provided for research purposes only.
+- Using this code for **malicious or illegal purposes is prohibited.** Comply with all applicable
+  laws, and do not use it for impersonation, harassment, defamation, or similar harm.
+- The authors are not responsible for any damages arising from the use of this code.
 
 ### Video Dataset
-[Here](https://drive.google.com/drive/folders/1E_8W805lioIznqbkvTQHWWi5IFXUG7Er?usp=drive_link) we provide two video clips used in our experiments, which are captured from YouTube. Please respect the original content creators' rights and comply with YouTube’s copyright policies in the usage.
 
-Other used videos can be found from [GeneFace](https://github.com/yerfor/GeneFace) and [AD-NeRF](https://github.com/YudongGuo/AD-NeRF). 
-
+Put the training video at `data/<ID>/<ID>.mp4`. It must be **25 FPS, around 512×512, 1–5 min**, with
+the speaker visible in every frame.
 
 ### Pre-processing Training Video
 
-* Put training video under `data/<ID>/<ID>.mp4`.
+```bash
+# 1. Video pre-processing (transforms.json / parsing / landmarks / background image, ...)
+python data_utils/process.py data/<ID>/<ID>.mp4
 
-  The video **must be 25FPS, with all frames containing the talking person**. 
-  The resolution should be about 512x512, and duration about 1-5 min.
+# 2. Extract AUs with OpenFace and save to data/<ID>/au.csv
+#    Make sure AU25_r is included
+python data_utils/extract_au_openface.py --root data/<ID>
 
-* Run script to process the video.
+# 3. Teeth mask
+export PYTHONPATH=./data_utils/easyportrait
+python ./data_utils/easyportrait/create_teeth_mask.py ./data/<ID>
 
-  ```bash
-  python data_utils/process.py data/<ID>/<ID>.mp4
-  ```
+# 4. 2D lip / cavity mask (required when using TG_LIP_CAVITY=1)
+python data_utils/easyportrait/create_lip_cavity_mask.py ./data/<ID>
 
-* Obtain Action Units
-  
-  Run `FeatureExtraction` in [OpenFace](https://github.com/TadasBaltrusaitis/OpenFace), rename and move the output CSV file to `data/<ID>/au.csv`.
-
-* Generate tooth masks
-
-  ```bash
-  export PYTHONPATH=./data_utils/easyportrait 
-  python ./data_utils/easyportrait/create_teeth_mask.py ./data/<ID>
-  ```
+# 5. 3D lip mask (obtain per-Gaussian lip votes after the face stage)
+python scripts/build_lip_mask_3d.py --root data/<ID> --ckpt <face stage ckpt>
+```
 
 ### Audio Pre-process
 
-In our paper, we use DeepSpeech features for evaluation. 
+DeepSpeech features are used for evaluation; HuBERT is also available (recommended for non-English).
 
-* DeepSpeech
+```bash
+# DeepSpeech
+python data_utils/deepspeech_features/extract_ds_features.py --input data/<name>.wav
 
-  ```bash
-  python data_utils/deepspeech_features/extract_ds_features.py --input data/<name>.wav # saved to data/<name>.npy
-  ```
-
-- HuBERT
-
-  Similar to ER-NeRF, HuBERT is also available. Recommended for situations if the audio is not in English.
-
-  Specify `--audio_extractor hubert` when training and testing.
-
-  ```
-  python data_utils/hubert.py --wav data/<name>.wav # save to data/<name>_hu.npy
-  ```
-
-### Data Loading
-
-By default, we preload all the data into RAM for acceleration, but the consumption maybe unaffordable (about N x 32GB RAM for about N x 5k frames). 
-
-(Experimental) You can try to set `preload=False` in the `scene/dataset_readers.py - readCamerasFromTransforms(·)` to load the data temporally per iteration to save the cost. As the trade-off, the speed could be slower.
+# HuBERT (select with --audio_extractor hubert)
+python data_utils/hubert.py --wav data/<name>.wav
+```
 
 ### Train
 
 ```bash
-# If resources are sufficient, partially parallel is available to speed up the training. See the script.
-bash scripts/train_xx.sh data/<ID> output/<project_name> <GPU_ID>
+dataset=data/<ID>
+work=output/<ID>_v30au25
+gpu=0
+export CUDA_VISIBLE_DEVICES=$gpu
+export TG_LIP_CAVITY=1
+
+# A. Face (25k iter)
+python train_face_v30.py -s $dataset -m $work --audio_extractor hubert \
+  --init_num 2000 --densify_grad_threshold 0.0015 --iterations 25000
+cp $work/chkpnt_face_v30_latest.pth $work/chkpnt_face_v30_clean.pth
+
+# B. Mouth (50k iter) — enable Plan F / G if needed
+#    Plan F: export TG_MOUTH_Z_MAX=0.05
+#    Plan G: export TG_ANISO_REG_W=0.001
+python train_mouth_v30.py -s $dataset -m $work --audio_extractor hubert --iterations 50000
+
+# C. Fuse init + D. Fuse training (10k iter)
+python scripts/build_fuse_v30_init.py \
+  --face_ckpt $work/chkpnt_face_v30_clean.pth \
+  --mouth_ckpt $work/chkpnt_mouth_v30_latest.pth \
+  --head_prior <pretrained V17 fuse .pth> \
+  --face_max_pts 50000 --out $work/chkpnt_fuse_v30_init.pth
+python train_fuse_v30e.py -s $dataset -m $work \
+  --init_ckpt $work/chkpnt_fuse_v30_init.pth \
+  --opacity_lr 0.001 --audio_extractor hubert --total_iters 10000 \
+  --au_window_T 8 --aperture_w 0.2 --detail_w 0.5 --feat_anchor_w 0.005 \
+  --arc_w 0.1 --dino_w 0.5 --lpips_w 0.0
 ```
+
+[`scripts/train_v30.sh`](scripts/train_v30.sh) runs the whole thing in one shot.
 
 ### Test
 
 ```bash
-# saved to output/<project_name>/test/ours_None/renders
-python synthesize_fuse.py -S data/<ID> -M output/<project_name> --eval  
+python synthesize_fuse_v18.py -s data/<ID> -m output/<ID>_v30au25 \
+  --eval --audio_extractor hubert \
+  --ckpt_name chkpnt_fuse_v30_latest.pth \
+  --output_dir output/<ID>_v30au25/render_v30_full --max_frames 9999 --au_window_T 8
 ```
 
 ### Inference with Specified Audio
 
 ```bash
-python synthesize_fuse.py -S data/<ID> -M output/<project_name> --use_train --audio <preprocessed_audio_feature>.npy
+python data_utils/hubert.py --wav new_audio.wav
+python synthesize_fuse_v18.py -s data/<ID> -m output/<ID>_v30au25 \
+  --use_train --audio new_audio_hu.npy \
+  --ckpt_name chkpnt_fuse_v30_latest.pth
 ```
 
-## Follow-Up 
-- [2025/02/28] Our work [InsTaG](https://fictionarry.github.io/InsTaG/) at CVPR 2025 is released! 🔥
+## Results (preliminary)
+
+Stage-F evaluation on 3 subjects with 25 fps video (numbers are mid-tuning):
+
+| Subject | Setting | PSNR ↑ | LMD ↓ |
+| ------- | ------- | ------ | ----- |
+| macron  | v30au25 (default) | **35.54** | **2.96** |
+| obama   | v30au25 (default) | **35.02** | **3.65** |
+| may     | v30au25 + `TG_MOUTH_Z_MAX=0.05` | 29.92 | 4.10 |
+
+## Method Overview
+
+GauTalk consists of the following components. See [DESIGN.md](DESIGN.md) for details:
+
+- **AU-aware MotionNetwork** — 7-dim expression input including AU25, per-axis tanh cap,
+  a y-axis HashGrid bypass and an AU25 additive branch (`au_mouth_branch`) for the mouth, and a
+  lip-landmark branch.
+- **Per-Gaussian Cross-Attention** — each Gaussian attends to 8 audio + 8 AU tokens and outputs
+  small `d_xyz/d_rot/d_opa/d_scale` residuals. The mouth stage uses a dual-head (lip head + cavity
+  head) configuration.
+- **Auxiliary heads** — PhonemeAuxHead (392-class phoneme prediction), PerGaussianAlbedoMLP
+  (articulation-dependent per-Gaussian RGB residual), and an aperture aux head (AU25/26 regression).
+- **Perceptual losses** — ArcFace identity + DINOv2 + Sobel detail + features_dc anchor.
+- **Mask pipeline** — soft mouth mask (erode + dilate), 2D lip/cavity masks, 3D lip vote, and a
+  merged `face_parsing_fine` class 11+12+13.
+- **Stabilisers** — anisotropy regularization, Z-prune, cavity depth prior, apex weight schedule.
+
+## Follow-Up
+
+- Validating `train_mouth_v2` (mouth-mask expansion).
+- Improving individual controllability of 17 AUs — designed while evaluating with OpenFace
+  back-measurement.
+- Evaluating robustness on multilingual audio (Japanese / Chinese) with HuBERT features.
 
 ## Citation
 
-Consider citing as below if you find this repository helpful to your project:
+```
+@misc{gautalk2026,
+  title  = {GauTalk: AU25-Driven 3D Gaussian Talking Head Synthesis},
+  author = {anonymous},
+  year   = {2026},
+  note   = {Preliminary work, in progress}
+}
+```
+
+If you use this project, please also cite the base work it is built on:
 
 ```
 @inproceedings{li2024talkinggaussian,
@@ -157,7 +215,21 @@ Consider citing as below if you find this repository helpful to your project:
 }
 ```
 
-
 ## Acknowledgement
 
-This code is developed on [gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting) with [simple-knn](https://gitlab.inria.fr/bkerbl/simple-knn), and a modified [diff-gaussian-rasterization](https://github.com/ashawkey/diff-gaussian-rasterization). Partial codes are from [RAD-NeRF](https://github.com/ashawkey/RAD-NeRF), [DFRF](https://github.com/sstzal/DFRF), [GeneFace](https://github.com/yerfor/GeneFace), and [AD-NeRF](https://github.com/YudongGuo/AD-NeRF). Teeth mask is from [EasyPortrait](https://github.com/hukenovs/easyportrait). Thanks for these great projects!
+This project is built on top of [TalkingGaussian (ECCV 2024)](https://github.com/Fictionarry/TalkingGaussian)
+and re-uses parts of [gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting),
+a modified [diff-gaussian-rasterization](https://github.com/ashawkey/diff-gaussian-rasterization),
+and [simple-knn](https://gitlab.inria.fr/bkerbl/simple-knn).
+Data utilities draw from [RAD-NeRF](https://github.com/ashawkey/RAD-NeRF),
+[ER-NeRF](https://github.com/Fictionarry/ER-NeRF),
+[AD-NeRF](https://github.com/YudongGuo/AD-NeRF), and
+[GeneFace](https://github.com/yerfor/GeneFace).
+Teeth and lip masks use [EasyPortrait](https://github.com/hukenovs/easyportrait),
+AU extraction uses [OpenFace](https://github.com/TadasBaltrusaitis/OpenFace), and
+perceptual losses use [DINOv2](https://github.com/facebookresearch/dinov2) and
+[facenet-pytorch](https://github.com/timesler/facenet-pytorch). Thanks to all authors.
+
+## License
+
+For research use only. See [LICENSE.md](LICENSE.md).

@@ -1,8 +1,8 @@
-# GauTalk: AU25-Driven 3D Gaussian Talking Head Synthesis
+# GauTalk: 検索再生型の頭部動作を持つ人物特化 3D Gaussian トーキングヘッド
 
 > 🚧 **Work in Progress** — このリポジトリは現在進行中の研究プロジェクトです。
 > API・学習スクリプト・ckpt 名・環境変数は予告なく変わる可能性があります。
-> 詳細な設計は [DESIGN.md](DESIGN.md)、未解決の課題は [DESIGN.md §4](DESIGN.md#4-ロードマップ) を参照。
+> 描画スタックの詳細設計は [DESIGN.md](DESIGN.md) を参照してください。
 
 [Paper (TBA)] | [Project (TBA)] | [Video (TBA)]
 
@@ -10,13 +10,67 @@
 
 > 🎞️ Demo video / qualitative comparisons — Coming soon.
 
-GauTalk は、音声と Action Unit から駆動される **3D Gaussian Splatting ベースの talking head 合成**
-パイプラインです。被写体ごとの動画 (1〜5 分) と OpenFace の AU、HuBERT / DeepSpeech 音声特徴から
-学習し、新規音声に対してフォトリアルなトーキングフェイスを描画します。
-AU25 (顎の開き) の明示入力、per-Gaussian cross-attention、dual-head mouth driver、ArcFace + DINOv2
-の知覚損失などを組み合わせ、長尺・任意音声でも口元が安定して動くように設計されています。
+GauTalk は、**本人の映像から学習した人物特化のトーキングヘッド合成**パイプラインです。
+被写体ごとの動画（数分）から学習し、新規音声に対してフォトリアルな顔動画を描画します。
+
+本手法の中心は、**頭部動作を「生成」せず「選んで再生する」**という設計です。
+同じ音声に対して自然な頭の動きは複数あり得るため、誤差最小化で回帰すると平均に潰れて
+ほとんど動かなくなります。GauTalk は代わりに、本人の実測動作を断片（ブロック）として
+記憶しておき、音声に応じてその中から選び、**学習動画の実フレームをそのまま再生**します。
 
 > 英語版 README は [`README_en.md`](README_en.md) を参照してください。
+
+---
+
+## System Overview
+
+駆動チャンネルは 3 つに分かれています。音声は「いつ切り替えるか」と「感情の方向」を担い、
+「どう動くか」の中身は本人の記憶側が担います。
+
+```
+                  ┌─ オフライン（学習時に一度だけ）────────────────┐
+  本人動画 ───────→│ ブロック分割 →  動作メモリ（ブロック＋接続グラフ）│
+                  └──────────────────────────────────────────────┘
+                                      │
+   音声 ─┬─→ 切替ゲート ──→ 切替時刻 ──┤
+         │                             ↓
+         │                     候補生成 →  動作選択
+         │                             ↓
+         │           実フレーム番号列（本人動画の実測値そのまま）
+         │                             ↓
+         │        頭部 6DoF ＋ カメラ行列・胴体画像（同一フレームに固定）
+         │
+         ├─→ 感情推定 ──→ 表情合成 ──→ 上半顔 6 AU
+         │
+         └─→ 口形（描画モデル内で音声から直接駆動）
+                                      ↓
+                  学習済み 3D Gaussian 描画モデル  →  顔動画
+```
+
+- **頭部動作（検索・再生）** — 本人動画を短い断片に分割して動作メモリを構築し、終端姿勢と
+  始端姿勢が近い組だけを接続可能とするグラフを作ります。推論時は合法な候補の中から選び、
+  出力は**動作パラメータではなく学習動画の実フレーム番号列**です。カメラ行列と胴体画像も
+  そのフレームのものを固定で使うため、動きは常に物理的に成立し、本人らしさが保たれます。
+- **上半顔の表情** — 上半顔 6 AU のみを合成します（土台＋実測イベント＋音声由来の感情方向
+  ＋まばたき、本人の可動域にクリップ）。**口の形は含まれません**。
+- **口形** — 描画モデル内で音声から直接駆動される別経路です（既存経路、変更なし）。
+- **描画** — TalkingGaussian ベースの 3D Gaussian Splatting 描画モデル。
+
+---
+
+## Repository Scope
+
+現時点で本リポジトリに含まれるのは**描画スタックとデータ前処理**です。
+
+| | 状態 |
+| --- | --- |
+| 3D Gaussian 描画モデル（face / mouth / fuse ステージ）| ✅ 本リポジトリに含む |
+| データ前処理（3DMM トラッキング・parsing・マスク・音声特徴）| ✅ 本リポジトリに含む |
+| 学習・推論スクリプト | ✅ 本リポジトリに含む |
+| 頭部動作プランナ（ブロック分割・動作メモリ・切替ゲート・動作選択）| 🔜 論文公開に合わせて順次リリース |
+| 評価・計測基盤 | 🔜 同上 |
+
+---
 
 ## Installation
 
@@ -54,20 +108,32 @@ wget "https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/easyportrai
 # OpenFace (AU 抽出) — 公式手順 https://github.com/TadasBaltrusaitis/OpenFace
 ```
 
+`environment.yml` に含まれていない追加依存があります（既定のレシピで必要になります）：
+
+```bash
+pip install transformers librosa   # data_utils/hubert.py
+pip install timm                   # DINOv2 知覚損失 (--dino_w)
+pip install scikit-image           # scripts/eval_v17_full.py
+pip install facenet-pytorch        # ArcFace 損失 (--arc_w、既定レシピでは必須)
+```
+
+**DINOv2 の重み** — `models/perceptual_losses.py` の既定パスが作者環境の絶対パスに
+ハードコードされています。`--dino_w > 0` を使う場合は
+`dinov2_vits14_pretrain.pth` を用意し、同ファイルのパスを自環境に合わせて書き換えてください。
+
+---
+
 ## Usage
 
 ### Important Notice
 
-- This code is provided for research purposes only.
-- 本コードを **悪意のある用途・違法な用途** に使用することを禁じます。
-  使用にあたっては適用される法令を遵守し、なりすまし・誹謗中傷・名誉毀損などに
-  繋がる利用は行わないでください。
-- 本コード使用により生じたいかなる損害についても、著者は責任を負いません。
+学習用動画は**単一人物・正面向き・背景静止**を前提としています。25fps・512×512 に揃えた
+`data/<ID>/<ID>.mp4` を用意してください。
 
 ### Video Dataset
 
-`data/<ID>/<ID>.mp4` に学習動画を置きます。**25 FPS、解像度 約 512×512、1〜5 分** で、
-全フレームに話者が映っていることが前提です。
+`data/<ID>/` 以下に動画と派生物を置きます。前処理を通すと `transforms_train.json`、
+`ori_imgs/`、`parsing/`、`torso_imgs/`、`gt_imgs/`、`au.csv`、音声特徴 `.npy` が生成されます。
 
 ### Pre-processing Training Video
 
@@ -77,120 +143,117 @@ python data_utils/process.py data/<ID>/<ID>.mp4
 
 # 2. OpenFace で AU を抽出し data/<ID>/au.csv に保存
 #    AU25_r が含まれていることを必ず確認
-python data_utils/extract_au_openface.py --root data/<ID>
 
 # 3. 歯マスク
-export PYTHONPATH=./data_utils/easyportrait
-python ./data_utils/easyportrait/create_teeth_mask.py ./data/<ID>
+python data_utils/easyportrait/create_teeth_mask.py data/<ID>
 
 # 4. lip / cavity 2D マスク (TG_LIP_CAVITY=1 を使う場合に必須)
-python data_utils/easyportrait/create_lip_cavity_mask.py ./data/<ID>
-
-# 5. lip 3D マスク (face stage 後に Gaussian 側の lip 投票を取得)
-python scripts/build_lip_mask_3d.py --root data/<ID> --ckpt <face stage ckpt>
+python data_utils/easyportrait/create_lip_cavity_mask.py data/<ID>
 ```
 
 ### Audio Pre-process
 
-評価には DeepSpeech 特徴を使っていますが、HuBERT も利用可能 (英語以外推奨)。
-
 ```bash
 # DeepSpeech
-python data_utils/deepspeech_features/extract_ds_features.py --input data/<name>.wav
+python data_utils/deepspeech_features/extract_ds_features.py --input data/<ID>
 
 # HuBERT (--audio_extractor hubert で指定)
-python data_utils/hubert.py --wav data/<name>.wav
+python data_utils/hubert.py --wav data/<ID>/aud.wav
 ```
 
 ### Train
 
+現行のメインラインは **v30e**（dual-head mouth fuse）です。
+
+> ⚠️ **前提条件** — fuse ステージは事前学習済みの **V17 fuse checkpoint**
+> (`chkpnt_fuse_v17_latest.pth`) を prior として必要とします。これは本リポジトリの
+> 手順からは生成できない外部資産です。`scripts/train_v30e.sh` は見つからない場合に
+> 明示的にエラー終了します。
+
 ```bash
 dataset=data/<ID>
-work=output/<ID>_v30au25
-gpu=0
-export CUDA_VISIBLE_DEVICES=$gpu
+work=output/<ID>_v30e
 export TG_LIP_CAVITY=1
 
-# A. Face (25k iter)
-python train_face_v30.py -s $dataset -m $work --audio_extractor hubert \
-  --init_num 2000 --densify_grad_threshold 0.0015 --iterations 25000
-cp $work/chkpnt_face_v30_latest.pth $work/chkpnt_face_v30_clean.pth
+# A. Face
+python train_face_v30.py -s $dataset -m $work --audio_extractor hubert --iterations 25000
+#    →  $work/chkpnt_face_v30_latest.pth
 
-# B. Mouth (50k iter) — 必要なら Plan F / G を有効化
+# B. Mouth — 必要なら Plan F / G を有効化
 #    Plan F: export TG_MOUTH_Z_MAX=0.05
 #    Plan G: export TG_ANISO_REG_W=0.001
 python train_mouth_v30.py -s $dataset -m $work --audio_extractor hubert --iterations 50000
+#    →  $work/chkpnt_mouth_v30_latest.pth
 
-# C. Fuse 初期化 + D. Fuse 学習 (10k iter)
-python scripts/build_fuse_v30_init.py \
-  --face_ckpt $work/chkpnt_face_v30_clean.pth \
+# C. Fuse 初期化（V17 prior + mouth ckpt から dual-head init を構築）
+python scripts/build_fuse_v30e_init.py \
+  --v17_fuse <事前学習済み V17 fuse の .pth> \
   --mouth_ckpt $work/chkpnt_mouth_v30_latest.pth \
-  --head_prior <事前学習済み V17 fuse の .pth> \
-  --face_max_pts 50000 --out $work/chkpnt_fuse_v30_init.pth
+  --out $work/chkpnt_fuse_v30e_init.pth
+
+# D. Fuse 学習
 python train_fuse_v30e.py -s $dataset -m $work \
-  --init_ckpt $work/chkpnt_fuse_v30_init.pth \
-  --opacity_lr 0.001 --audio_extractor hubert --total_iters 10000 \
+  --init_ckpt $work/chkpnt_fuse_v30e_init.pth \
+  --opacity_lr 0.001 --audio_extractor hubert --total_iters 5000 \
   --au_window_T 8 --aperture_w 0.2 --detail_w 0.5 --feat_anchor_w 0.005 \
   --arc_w 0.1 --dino_w 0.5 --lpips_w 0.0
+#    →  $work/chkpnt_fuse_v30e_latest.pth
 ```
 
-[`scripts/train_v30.sh`](scripts/train_v30.sh) でワンショットでも実行可能です。
+C〜D は [`scripts/train_v30e.sh`](scripts/train_v30e.sh) でまとめて実行できます
+（`bash scripts/train_v30e.sh $dataset $work <gpu_id> [fuse_iters]`）。
+各ステージの損失重み・環境変数は [DESIGN.md](DESIGN.md) を参照してください。
 
 ### Test
 
 ```bash
-python synthesize_fuse_v18.py -s data/<ID> -m output/<ID>_v30au25 \
+python synthesize_fuse_v30e.py -s data/<ID> -m output/<ID>_v30e \
   --eval --audio_extractor hubert \
-  --ckpt_name chkpnt_fuse_v30_latest.pth \
-  --output_dir output/<ID>_v30au25/render_v30_full --max_frames 9999 --au_window_T 8
+  --ckpt_name chkpnt_fuse_v30e_latest.pth \
+  --output_dir output/<ID>_v30e/render_v30e_full --max_frames 9999 --au_window_T 8
+
+python scripts/eval_v17_full.py output/<ID>_v30e/render_v30e_full/seq_test
 ```
 
-### Inference with Specified Audio
+> v30e の重みは **`synthesize_fuse_v30e.py`** で描画してください。旧 `synthesize_fuse_v18.py`
+> には cavity head の分岐がないため、dual-head で学習した重みを読ませると cavity 駆動が失われます。
 
-```bash
-python data_utils/hubert.py --wav new_audio.wav
-python synthesize_fuse_v18.py -s data/<ID> -m output/<ID>_v30au25 \
-  --use_train --audio new_audio_hu.npy \
-  --ckpt_name chkpnt_fuse_v30_latest.pth
-```
+### 頭部動作の駆動について
 
-## Results (preliminary)
+頭部動作の検索・再生（動作メモリからのブロック選択と実フレーム再生）は現時点で
+**本リポジトリの外**にあり、論文公開に合わせてリリースします。上記の推論スクリプトは
+評価スプリットを描画するもので、頭部姿勢は学習動画のものを使います。
+任意音声から頭部動作まで含めて駆動する経路は、現状このリポジトリでは公開していません。
 
-3 被験者・25fps 動画でのステージ F 評価値（チューニング途中の数値です）：
+---
 
-| 被験者 | 設定 | PSNR ↑ | LMD ↓ |
-| ------ | ---- | ------ | ----- |
-| macron | v30au25 (default) | **35.54** | **2.96** |
-| obama  | v30au25 (default) | **35.02** | **3.65** |
-| may    | v30au25 + `TG_MOUTH_Z_MAX=0.05` | 29.92 | 4.10 |
+## Known Issues
 
-## Method Overview
+試行錯誤期に増えたスクリプトが整理しきれておらず、以下は現状動作しません。順次修正します。
 
-GauTalk は次の要素で構成されています。詳細は [DESIGN.md](DESIGN.md)：
+- `scripts/train_v30.sh`（旧 v30 系）— 存在しない `train_fuse_v28.py` を呼ぶため途中で停止します。
+  **v30e 系の [`scripts/train_v30e.sh`](scripts/train_v30e.sh) を使ってください。**
+- `data_utils/extract_au_openface.py` — 空ファイルです。AU 抽出は OpenFace の
+  `FeatureExtractor` を直接実行し、`data/<ID>/au.csv` に保存してください。
+- `scripts/build_lip_mask_3d.py` — リポジトリに含まれない `train_au_editor.py` を import
+  するため実行できません（lip 3D マスクの手順は現状省略可能です）。
+- `models/perceptual_losses.py` の DINOv2 重みパス、`train_fuse_v30e.py` の `--init_ckpt` 既定値、
+  `scripts/train_v30e.sh` の V17 prior パスが作者環境の絶対パスにハードコードされています。
 
-- **AU-aware MotionNetwork** — AU25 を加えた 7 次元 expression 入力、per-axis tanh cap、
-  mouth 用 y-axis HashGrid bypass と AU25 加算分岐 (`au_mouth_branch`)、唇ランドマーク分岐。
-- **Per-Gaussian Cross-Attention** — 各 Gaussian が 8 音声 + 8 AU トークンにアテンションを
-  かけ、`d_xyz/d_rot/d_opa/d_scale` の小さな残差を出力。Mouth stage では lip head と
-  cavity head の dual-head 構成。
-- **Auxiliary heads** — PhonemeAuxHead（392 クラス音素予測）、PerGaussianAlbedoMLP
-  （発音状態依存の per-Gaussian RGB 残差）、aperture aux head（AU25/26 回帰）。
-- **Perceptual losses** — ArcFace identity + DINOv2 + Sobel detail + features_dc anchor。
-- **Mask pipeline** — soft mouth mask (erode + dilate)、2D lip/cavity マスク、
-  3D lip vote、`face_parsing_fine` の class 11+12+13 統合。
-- **Stabilisers** — 異方性正則化、Z-prune、cavity depth prior、apex weight schedule。
+## Results
 
-## Follow-Up
+定量評価は**論文投稿中のため本リポジトリでは公開していません**。
+評価プロトコル・比較手法・数値は、論文の公開に合わせて掲載します。
 
-- `train_mouth_v2` (mouth mask 拡張) を検証予定。
-- 17-AU 個別可制御性の改善 — OpenFace 逆計測で評価しながら設計中。
-- 多言語音声 (日本語 / 中国語) でのロバスト性を HuBERT 特徴で評価中。
+（以前のバージョンに掲載していた描画ステージのみの暫定値は、対象範囲が変わったため取り下げました。）
+
+---
 
 ## Citation
 
 ```
 @misc{gautalk2026,
-  title  = {GauTalk: AU25-Driven 3D Gaussian Talking Head Synthesis},
+  title  = {GauTalk: Person-Specific 3D Gaussian Talking Head with Retrieval-Based Head Motion},
   author = {anonymous},
   year   = {2026},
   note   = {Preliminary work, in progress}
@@ -214,4 +277,4 @@ perceptual losses use [DINOv2](https://github.com/facebookresearch/dinov2) and
 
 ## License
 
-For research use only. See LICENSE.md.
+For research use only. See [LICENSE.md](LICENSE.md).

@@ -1,4 +1,4 @@
-# GauTalk: Person-Specific 3D Gaussian Talking Head with Retrieval-Based Head Motion
+# GauTalk: Person-Specific Head Motion and Facial Expressions for 3D Gaussian Talking Heads
 
 This repository contains research code under active development. APIs, training scripts,
 checkpoint names, and environment variables may change without notice. The design of the
@@ -8,11 +8,11 @@ GauTalk is a person-specific talking-head synthesis pipeline learned from a subj
 video. It is trained from a per-subject recording (a few minutes) and renders a photorealistic
 talking face for novel audio.
 
-The central design choice is that head motion is not generated — it is selected and replayed.
-For the same audio there are many plausible head trajectories, so regressing one by minimizing
-error collapses toward the average and the head barely moves. Instead, GauTalk stores the
-subject's own measured motion as short segments (blocks), selects among them as the audio
-proceeds, and replays actual frames from the training video.
+The central design choice is that head motion and expression are not generated — the subject's
+own measured blocks are selected and concatenated. For the same audio there are many plausible
+head trajectories, so regressing one by minimizing error collapses toward the average and the
+head barely moves. Instead, GauTalk collects the blocks of motion the subject actually performed
+(real blocks) by type, and concatenates real blocks of the types predicted by a generic Transformer.
 
 This is not the official TalkingGaussian repository. GauTalk is built on top of
 [TalkingGaussian (ECCV 2024)](https://github.com/Fictionarry/TalkingGaussian); see the
@@ -23,41 +23,25 @@ Acknowledgement section for full attribution. A Japanese version of this README 
 
 ## System Overview
 
-Three driving channels. Audio determines *when* to switch and the direction of expression;
-*what* the motion contains comes from the subject's own recorded material.
+GauTalk does not generate head motion and expression; it selects and concatenates the
+subject's own measured motion blocks.
 
-```
-                   ┌─ offline (once, at training time) ───────────────┐
-  subject video ──→│ block segmentation → motion memory (blocks +     │
-                   │                       compatibility graph)       │
-                   └─────────────────────────────────────────────────┘
-                                       │
-   audio ─┬─→ switching gate ──→ switch times ──┤
-          │                                     ↓
-          │                      candidate generation → motion selection
-          │                                     ↓
-          │              sequence of real frame indices (subject's own frames)
-          │                                     ↓
-          │        head 6-DoF + camera matrix & torso image (locked to that frame)
-          │
-          ├─→ emotion estimation ──→ expression synthesis ──→ 6 upper-face AUs
-          │
-          └─→ mouth (driven directly from audio inside the renderer)
-                                       ↓
-                    trained 3D Gaussian renderer  →  face video
-```
+1. Videos of many speakers are cut into short blocks of head motion and facial expression,
+   and the blocks are grouped into types. A generic Transformer is then trained to predict
+   the type of the next block from the preceding blocks and the audio.
+2. The same processing is applied to the target subject's video to build a feature set,
+   i.e. the subject's real blocks grouped by type, and the generic Transformer is fine-tuned
+   on the subject's data.
+3. At generation time, a real block of the predicted type is selected from the subject's
+   feature set and appended; the resulting head motion and expression are fed, together
+   with the audio, to the 3D Gaussian renderer to produce the face video.
 
-- **Head motion (retrieve & replay)** — the subject's video is segmented into short blocks to build
-  a motion memory, together with a graph that permits a transition only between blocks whose end
-  and start poses are close. At inference the system selects among the legal candidates, and the
-  output is a sequence of real frame indices from the training video rather than motion
-  parameters. Camera matrices and torso images are taken from those same frames, so the motion is
-  always physically realizable and stays in character.
-- **Upper-face expression** — only 6 upper-face AUs are synthesized (a per-subject base, measured
-  events, an audio-derived emotion direction, and blinks, clipped to the subject's own range).
-  The mouth shape is not part of this channel.
-- **Mouth** — driven directly from audio inside the renderer (existing path, unchanged).
-- **Rendering** — a 3D Gaussian Splatting renderer built on TalkingGaussian.
+Expression covers the six AUs around the brows and eyes (AU01, 04, 05, 06, 07, 45) and is
+produced in the same framework as head motion. Blinks are not used for segmentation; they stay
+inside the blocks and are replayed as is. Mouth shape is a separate path driven directly from
+audio inside the renderer. Details of the method will be published with the paper. This
+repository contains the renderer and data preprocessing; the planner in steps 1–3 is not yet
+released (see Repository Scope).
 
 ---
 
@@ -68,10 +52,18 @@ At this point the repository contains the rendering stack and data preprocessing
 | Component | Status |
 | --- | --- |
 | 3D Gaussian renderer (face / mouth / fuse stages) | Included |
-| Data preprocessing (3DMM tracking, parsing, masks, audio features) | Included |
-| Training and inference scripts | Included |
-| Head-motion planner (block segmentation, motion memory, switching gate, selection) | Not yet released (planned with the paper) |
-| Evaluation and measurement harness | Not yet released (same as above) |
+| Data preprocessing for the renderer (3DMM tracking, parsing, masks, audio features) | Included |
+| Renderer training and inference scripts (rendered with the training video's head poses and AUs) | Included |
+| Head-pose and expression extraction (FLAME 6-DoF via EMICA, AUs via OpenFace), block segmentation and typing | Not yet released (interface stubs only, under [`planner/`](planner/)) |
+| Generic Transformer training code and weights, per-subject fine-tuning, feature-set construction | Not yet released (same as above) |
+| Real-block selection and concatenation, and the path feeding generated head motion and expression into the renderer | Not yet released (same as above) |
+| Evaluation and measurement harness | Not yet released (planned with the paper) |
+
+The 3DMM tracking listed above estimates the head/camera poses used to train the renderer. The
+head-pose extraction described in the paper (EMICA, based on FLAME) belongs to the planner's
+preprocessing and will be released together with the planner. `planner/` holds only function
+stubs that document the inputs and outputs of each stage; it contains no implementation,
+weights, or configuration values.
 
 ---
 
@@ -166,7 +158,7 @@ python data_utils/hubert.py --wav data/<ID>/aud.wav
 
 ### Train
 
-The current mainline is v30e (dual-head mouth fuse).
+Training has three stages: face → mouth → fuse (the fuse stage uses a dual-head mouth).
 
 **Prerequisite.** The fuse stage requires a pre-trained fuse checkpoint as the face
 foundation. This is an external asset that cannot be produced from the steps in this repository.
@@ -222,12 +214,14 @@ python scripts/eval_v17_full.py output/<ID>_v30e/render_v30e_full/seq_test
 Render v30e weights with `synthesize_fuse_v30e.py`. The older `synthesize_fuse_v18.py`
 has no cavity-head branch, so loading dual-head weights into it silently drops cavity driving.
 
-### On head-motion driving
+### On head-motion and expression driving
 
-Head-motion retrieval and replay (block selection from the motion memory and real-frame replay)
-currently lives outside this repository and will be released alongside the paper. The
-inference scripts above render the evaluation split, with head poses taken from the training
-video. A path that drives head motion from arbitrary audio is not published here yet.
+The planner (block segmentation, typing, the generic Transformer and its fine-tuning, and
+real-block selection and concatenation) currently lives outside this repository and will be
+released alongside the paper. The inference scripts above render the evaluation split, with head
+poses and AUs taken from the training video. A path that drives head motion and expression from
+arbitrary audio is not published here yet. The per-stage interfaces are documented in
+[`planner/README.md`](planner/README.md).
 
 ---
 
@@ -236,7 +230,7 @@ video. A path that drives head motion from arbitrary audio is not published here
 Scripts accumulated during exploratory work have not been fully cleaned up. The following do not
 currently work and are being fixed:
 
-- `scripts/train_v30.sh` (the older line) calls a fuse-training script that is not in the
+- `scripts/train_v30.sh` calls a fuse-training script that is not in the
   repository and stops partway through. Use [`scripts/train_v30e.sh`](scripts/train_v30e.sh) instead.
 - `data_utils/extract_au_openface.py` is an empty file. Run OpenFace's `FeatureExtractor`
   directly and save the result to `data/<ID>/au.csv`.
@@ -251,16 +245,13 @@ currently work and are being fixed:
 Quantitative results are not listed in this repository until the paper is public.
 The evaluation protocol, baselines, and numbers will be released together with the paper.
 
-(The preliminary rendering-stage numbers previously listed here have been withdrawn, as the scope
-of the project has since changed.)
-
 ---
 
 ## Citation
 
 ```
 @misc{gautalk2026,
-  title  = {GauTalk: Person-Specific 3D Gaussian Talking Head with Retrieval-Based Head Motion},
+  title  = {GauTalk++: Person-Specific Head Motion and Facial Expressions for 3D Gaussian Splatting-Based Talking Head Synthesis},
   author = {anonymous},
   year   = {2026},
   note   = {Preliminary work, in progress}

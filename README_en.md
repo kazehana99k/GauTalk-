@@ -24,7 +24,26 @@ Acknowledgement section for full attribution. A Japanese version of this README 
 ## System Overview
 
 GauTalk does not generate head motion and expression; it selects and concatenates the
-subject's own measured motion blocks.
+subject's own measured motion blocks. The overall structure is shown below (same layout as
+Fig. 1 of the paper: left, training the generic model on multi-speaker data; right,
+per-subject fine-tuning and video generation).
+
+```
+multi-speaker dataset (video + audio)              target subject's video (video + audio)
+   │ segment & type                                    │ type with the same model
+   ▼                                                   ▼
+head-motion feature set / expression feature set    subject's head-motion / expression feature set
+   │ train                                             │ real blocks
+   ▼              fine-tune (subject's data)           │
+generic head-motion Transformer ────────────────▶ subject head-motion Transformer
+generic expression Transformer  ────────────────▶ subject expression Transformer
+   ▲ audio                                             │ type of the next block
+                                                       ▼
+                                  select the subject's real blocks first & concatenate
+                                                       │ head motion + expression
+                                                       ▼
+                        3D Gaussian renderer (audio as well) ── render ──▶ talking-face video
+```
 
 1. Videos of many speakers are cut into short blocks of head motion and facial expression,
    and the blocks are grouped into types. A generic Transformer is then trained to predict
